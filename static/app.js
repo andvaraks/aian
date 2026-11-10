@@ -1,14 +1,23 @@
 'use strict';
 const file = document.querySelector('#file'), choose = document.querySelector('#choose'), list = document.querySelector('#list'), message = document.querySelector('#message'), drop = document.querySelector('#drop');
+const cloudForm = document.querySelector('#cloud-form');
+const cloudLink = document.querySelector('#cloud-link');
+const cloudSubmit = document.querySelector('#cloud-submit');
+const cloudMessage = document.querySelector('#cloud-message');
 let selected = null, state = null, sending = false, timer = null;
 let lastList = '';
 const labels = {processing:'Обрабатывается', ready:'Готово', error:'Ошибка'};
+const stages = {fetching:'Получение файла', preparing:'Проверка видео', transcribing:'Распознавание речи', analyzing:'AI-анализ'};
+function statusLabel(record) {
+  return record.status === 'processing' ? stages[record.stage] || labels.processing : labels[record.status];
+}
 function node(tag, text, cls) { const el = document.createElement(tag); if(text !== undefined) el.textContent = text; if(cls) el.className = cls; return el; }
 function notice(text, bad=false) { message.hidden = !text; message.textContent=text; message.className='message'+(bad?' bad':''); }
 async function api(url, options) { const response=await fetch(url, options); let body; try { body=await response.json(); } catch {throw new Error('Не удалось связаться с сервером. Попробуйте позже');} if(!response.ok) throw new Error(body.message || 'Не удалось выполнить запрос'); return body; }
 function limits() {
   if(sending) return;
   choose.disabled = !state || !state.available;
+  cloudSubmit.disabled = !state;
   choose.textContent = 'Выбрать запись ↗';
   if(!state) return;
   if(state.total_exhausted) notice('Общий лимит приложения — 20 обработок — исчерпан. Новые записи больше не принимаются.',true);
@@ -20,7 +29,7 @@ async function detail(id, container) {
   container.replaceChildren(node('p','Загружаем результат…','muted'));
   try {
     const data=await api('/api/meetings/'+encodeURIComponent(id)); container.replaceChildren();
-    if(data.status==='processing') {container.append(node('p','Обрабатывается. Результат появится здесь автоматически.')); return;}
+    if(data.status==='processing') {container.append(node('p',statusLabel(data) + '. Результат появится здесь автоматически.')); return;}
     if(data.status==='error') {
       container.append(node('p',data.error_message || 'Не удалось обработать запись'));
       if(data.attempt_consumed_at) container.append(node('p','Сегодняшняя попытка использована.','muted'));
@@ -50,7 +59,9 @@ async function refresh() {
     for(const m of meetings) {
       const el=node('details',undefined,'meeting');el.dataset.id=m.id;
       const summary=node('summary'), name=node('div');name.append(node('span',m.filename,'meeting-title'),node('span',new Date(m.created_at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',dateStyle:'medium',timeStyle:'short'})+' · МСК','meeting-date'));
-      summary.append(name,node('span',labels[m.status], 'status '+m.status));const result=node('div',undefined,'result');el.append(summary,result);
+      name.append(node('span', m.source === 'cloud' ? 'Из облака' : 'Загружено вручную', 'meeting-date'));
+      if (m.summary_preview) name.append(node('span', m.summary_preview, 'meeting-preview'));
+      summary.append(name,node('span',statusLabel(m), 'status '+m.status));const result=node('div',undefined,'result');el.append(summary,result);
       el.addEventListener('toggle',()=>{if(el.open) {selected=m.id;detail(m.id,result);}});
       list.append(el); if(open.has(m.id)||selected===m.id) el.open=true;
     }
@@ -62,12 +73,40 @@ async function sendFile(value) {
   if(!state?.available) {limits();return;}
   if(!/\.(mp4|webm|mp3|wav|m4a)$/i.test(value.name)) {notice('Выберите файл MP4, WebM, MP3, WAV или M4A',true);return;}
   if(!value.size || value.size>104857600) {notice(value.size?'Файл превышает допустимый размер 100 МиБ':'Выбран пустой файл',true);return;}
-  sending=true;choose.disabled=true;choose.textContent='Загрузка файла…';notice('Загрузка файла…');clearTimeout(timer);
+  sending=true;choose.disabled=true;cloudSubmit.disabled=true;choose.textContent='Загрузка файла…';notice('Загрузка файла…');clearTimeout(timer);
   const form=new FormData();form.append('file',value);
   let failure='';
   try {const result=await api('/api/meetings',{method:'POST',body:form});selected=result.id;} catch(error){failure=error.message;}
   finally {sending=false;file.value='';await refresh();if(failure)notice(failure,true);}
 }
+cloudForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (sending) return;
+  sending = true;
+  choose.disabled = true;
+  cloudSubmit.disabled = true;
+  cloudMessage.textContent = 'Проверяем ссылку…';
+  clearTimeout(timer);
+  let importedId;
+  try {
+    const result = await api('/api/meetings/cloud', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: cloudLink.value.trim()})
+    });
+    importedId = result.id;
+    selected = importedId;
+    cloudMessage.textContent = result.existing ? 'Эта запись уже добавлена. Открыли её в истории.' : 'Запись добавлена. Статус появится в истории.';
+    cloudLink.value = '';
+  } catch (error) {
+    cloudMessage.textContent = error.message;
+  } finally {
+    sending = false;
+    await refresh();
+    const record = [...list.querySelectorAll('.meeting')].find(element => element.dataset.id === importedId);
+    if (record) record.open = true;
+  }
+});
 choose.addEventListener('click',()=>file.click());file.addEventListener('change',()=>sendFile(file.files[0]));
 for(const event of ['dragenter','dragover']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add('over');});
 for(const event of ['dragleave','drop']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove('over');});

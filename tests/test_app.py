@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+import httpx
 
 scratch = tempfile.TemporaryDirectory()
 os.environ.update(DATA_DIR=str(Path(scratch.name)/'data'), TEMP_DIR=str(Path(scratch.name)/'temp'),
@@ -61,6 +62,54 @@ class AppTests(unittest.TestCase):
     def test_busy_no_consumption(self):
         service.busy=True
         self.assertEqual(self.post().status_code,409)
+
+    def test_cloud_existing_result_before_quota(self):
+        first = 'https://www.dropbox.com/scl/fi/file/meeting.mp4?dl=0&rlkey=key'
+        equivalent = 'https://dl.dropboxusercontent.com/scl/fi/file/meeting.mp4?rlkey=key&raw=1'
+        owner = service.hashlib.sha256(self.client.cookies.get(service.COOKIE).encode()).hexdigest()
+        mid = self.seed(owner)
+        service.consume(mid)
+        key = service.hashlib.sha256(service.normalize_cloud_url(first).encode()).hexdigest()
+        service.update(mid, status='ready', source='cloud', cloud_key=key)
+        response = self.client.post('/api/meetings/cloud', json={'url': equivalent}, headers={'Origin': 'http://testserver'})
+        self.assertEqual(response.json(), {'id': mid, 'status': 'ready', 'existing': True})
+        self.assertEqual(len(self.client.get('/api/meetings').json()), 1)
+        with service.db() as conn:
+            self.assertEqual(conn.execute('SELECT used FROM app_state').fetchone()[0], 1)
+
+    def test_cloud_redirect_rejects_external_host(self):
+        requested = []
+
+        def respond(request):
+            requested.append(request.url.host)
+            return httpx.Response(302, headers={'Location': 'http://127.0.0.1:8006/api/health'})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch.object(service.httpx, 'AsyncClient', return_value=client):
+            with self.assertRaises(service.Problem) as error:
+                asyncio.run(service.download_cloud('https://www.dropbox.com/s/file/meeting.mp4?dl=1', service.TEMP))
+        self.assertEqual(error.exception.code, 'CLOUD_URL')
+        self.assertEqual(requested, ['www.dropbox.com'])
+
+    def test_cloud_download_error_preserves_quota(self):
+        async def unavailable(url, directory):
+            raise httpx.ConnectError('unavailable')
+
+        with patch.object(service, 'download_cloud', unavailable):
+            response = self.client.post('/api/meetings/cloud', json={'url': 'https://drive.google.com/file/d/test/view'},
+                                        headers={'Origin': 'http://testserver'})
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json()['stage'], 'fetching')
+            mid = response.json()['id']
+            for _ in range(50):
+                detail = self.client.get('/api/meetings/' + mid).json()
+                if detail['status'] == 'error':
+                    break
+                time.sleep(.01)
+        self.assertEqual(detail['error_code'], 'CLOUD_DOWNLOAD')
+        self.assertEqual(detail['source'], 'cloud')
+        self.assertIsNone(detail['attempt_consumed_at'])
+        self.assertTrue(self.client.get('/api/session').json()['available'])
 
     def test_cookie_and_cross_browser_access(self):
         cookie=self.client.cookies.get(service.COOKIE)
