@@ -34,6 +34,8 @@ DAILY = int(os.getenv('DAILY_LIMIT', '1'))
 TOTAL = int(os.getenv('TOTAL_LIMIT', '20'))
 TZ = ZoneInfo(os.getenv('LIMIT_TIMEZONE', 'Europe/Moscow'))
 ORIGIN = os.getenv('PUBLIC_ORIGIN', 'https://lin.aisito.ru').rstrip('/')
+VERCEL_ORIGIN = os.getenv('VERCEL_PUBLIC_ORIGIN', '').rstrip('/')
+ALLOWED_ORIGINS = {origin for origin in (ORIGIN, VERCEL_ORIGIN) if origin}
 COOKIE_SECURE = os.getenv('COOKIE_SECURE', 'true').lower() == 'true'
 COOKIE = '__Host-meeting_browser' if COOKIE_SECURE else 'meeting_browser'
 EXTENSIONS = {'.mp4', '.webm', '.mp3', '.wav', '.m4a'}
@@ -142,7 +144,7 @@ class Guard:
         async def reject(code, message, status):
             await JSONResponse({'code': code, 'message': message}, status_code=status)(scope, receive, send)
         if method not in ('GET', 'HEAD', 'OPTIONS'):
-            if headers.get(b'origin', b'').decode() != ORIGIN:
+            if headers.get(b'origin', b'').decode() not in ALLOWED_ORIGINS:
                 return await reject('ORIGIN', 'Запрос с этого адреса не разрешён', 403)
         try:
             length = int(headers.get(b'content-length', b'0'))

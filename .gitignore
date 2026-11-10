@@ -5,3 +5,4 @@ temp/
 .env
 *.sqlite*
 work/
+dist/
